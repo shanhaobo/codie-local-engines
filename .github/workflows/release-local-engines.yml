@@ -1,0 +1,112 @@
+name: Release local engine sidecars
+
+# Builds the PyInstaller sidecar binaries on real Windows + macOS runners and
+# publishes them as release assets the Bridge downloads at runtime.
+#
+# Per-engine release tags (so each engine versions independently):
+#   codie-asr-local-vX.Y.Z   -> builds local_engines/asr  (faster-whisper)
+#   codie-tts-local-vX.Y.Z    -> builds local_engines/tts  (Piper)
+#
+# Each tag fans out to windows-x64 + macos-arm64 + macos-x64; every job uploads
+# its archive plus a .sha256 sidecar to the release for that tag. The Bridge
+# composes the download URL from the configurable ghcrNamespace (GitHub owner)
+# + repo + tag + per-OS artifact name.
+
+on:
+  push:
+    tags:
+      - 'codie-asr-local-v*'
+      - 'codie-tts-local-v*'
+  # Manual runs for testing: pick the engine; produces a draft release on the
+  # chosen tag if one is supplied, else just builds (no upload).
+  workflow_dispatch:
+    inputs:
+      engine:
+        description: 'Engine to build'
+        type: choice
+        options: [codie-asr-local, codie-tts-local]
+        required: true
+      tag:
+        description: 'Release tag to upload to (blank = build only, no upload)'
+        required: false
+
+permissions:
+  contents: write   # create the release + upload assets
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, macos-14, macos-13]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+
+      - name: Resolve engine + tag
+        id: meta
+        shell: bash
+        run: |
+          if [[ "${GITHUB_EVENT_NAME}" == "workflow_dispatch" ]]; then
+            engine="${{ github.event.inputs.engine }}"
+            tag="${{ github.event.inputs.tag }}"
+          else
+            tag="${GITHUB_REF_NAME}"
+            case "$tag" in
+              codie-asr-local-*) engine="codie-asr-local" ;;
+              codie-tts-local-*) engine="codie-tts-local" ;;
+              *) echo "::error::unrecognized tag '$tag'"; exit 1 ;;
+            esac
+          fi
+          case "$engine" in
+            codie-asr-local) script="build-asr-sidecar" ;;
+            codie-tts-local) script="build-tts-sidecar" ;;
+            *) echo "::error::unknown engine '$engine'"; exit 1 ;;
+          esac
+          echo "engine=$engine" >> "$GITHUB_OUTPUT"
+          echo "script=$script" >> "$GITHUB_OUTPUT"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+
+      - name: Build (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: ./scripts/${{ steps.meta.outputs.script }}.ps1
+
+      - name: Build (macOS)
+        if: runner.os == 'macOS'
+        shell: bash
+        run: bash ./scripts/${{ steps.meta.outputs.script }}.sh
+
+      - name: Locate artifact + checksum
+        id: art
+        shell: bash
+        run: |
+          engine="${{ steps.meta.outputs.engine }}"
+          f=$(ls local_engines/*/dist/${engine}-*.zip local_engines/*/dist/${engine}-*.tar.gz 2>/dev/null | head -1)
+          if [[ -z "$f" ]]; then echo "::error::no artifact found for $engine"; exit 1; fi
+          if command -v shasum >/dev/null 2>&1; then shasum -a 256 "$f" > "$f.sha256"; else sha256sum "$f" > "$f.sha256"; fi
+          echo "path=$f" >> "$GITHUB_OUTPUT"
+          echo "sha=$f.sha256" >> "$GITHUB_OUTPUT"
+          echo "--- $f ---"; cat "$f.sha256"
+
+      - name: Upload build artifact (always, for inspection)
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.meta.outputs.engine }}-${{ matrix.os }}
+          path: |
+            ${{ steps.art.outputs.path }}
+            ${{ steps.art.outputs.sha }}
+
+      - name: Publish to release
+        # Only when a real tag is present (tag push, or dispatch with a tag).
+        if: steps.meta.outputs.tag != ''
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.meta.outputs.tag }}
+          files: |
+            ${{ steps.art.outputs.path }}
+            ${{ steps.art.outputs.sha }}
