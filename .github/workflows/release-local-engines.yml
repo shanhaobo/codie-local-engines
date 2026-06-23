@@ -37,8 +37,11 @@ jobs:
   build:
     strategy:
       fail-fast: false
+      # windows-latest = amd64; macos-14 = Apple Silicon arm64; macos-15-intel =
+      # Intel amd64. (macos-13 was retired by GitHub in Dec 2025 — jobs requesting
+      # it queue forever; macos-15-intel is the current/last Intel image, to 2027.)
       matrix:
-        os: [windows-latest, macos-14, macos-13]
+        os: [windows-latest, macos-14, macos-15-intel]
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
