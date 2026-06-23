@@ -1,6 +1,6 @@
 # Build the local TTS sidecar (our codie-tts-local wrapper around Piper) into a
 # distributable zip on Windows. Runtime-download delivery (see
-# build-asr-sidecar.ps1 header): produces dist\codie-tts-local-windows-x64.zip +
+# build-asr-sidecar.ps1 header): produces dist\codie-tts-local-windows-amd64.zip +
 # prints its SHA-256 for an operator to upload and paste into LocalEngineSpec
 # (id codie-tts-local, win).
 #
@@ -21,7 +21,7 @@ function Invoke-Checked {
 $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $EngineDir = Resolve-Path (Join-Path $ScriptDir '..\local_engines\tts')
 $Id = 'codie-tts-local'
-$Arch = 'windows-x64'
+$Arch = 'windows-amd64'   # x64 == x86_64 == amd64
 Set-Location $EngineDir
 Write-Host "[build-tts-sidecar] working in $EngineDir"
 

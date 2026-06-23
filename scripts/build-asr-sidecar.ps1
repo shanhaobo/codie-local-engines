@@ -1,7 +1,7 @@
 # Build the local ASR sidecar (our codie-asr-local wrapper around faster-whisper)
 # into a distributable zip on Windows. Unlike build-sidecar.ps1 (which bundles
 # host_mcp into the app Resources), the ASR/TTS sidecars are delivered by RUNTIME
-# DOWNLOAD: this script produces dist\codie-asr-local-windows-x64.zip + prints its
+# DOWNLOAD: this script produces dist\codie-asr-local-windows-amd64.zip + prints its
 # SHA-256, for an operator to upload and paste into LocalEngineSpec
 # (id codie-asr-local, win).
 #
@@ -28,7 +28,7 @@ function Invoke-Checked {
 $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $EngineDir = Resolve-Path (Join-Path $ScriptDir '..\local_engines\asr')
 $Id = 'codie-asr-local'
-$Arch = 'windows-x64'
+$Arch = 'windows-amd64'   # x64 == x86_64 == amd64
 Set-Location $EngineDir
 Write-Host "[build-asr-sidecar] working in $EngineDir"
 

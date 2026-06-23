@@ -40,8 +40,9 @@ case "$(uname -s)" in
   Darwin*) OS="macos" ;;
   *) OS="linux" ;;
 esac
-ARCH="$(uname -m)"   # arm64 / x86_64
-case "$ARCH" in x86_64) ARCH="x64" ;; aarch64) ARCH="arm64" ;; esac
+# Normalize to amd64 / arm64 (uname -m is x86_64 on Intel, arm64/aarch64 on ARM).
+ARCH="$(uname -m)"
+case "$ARCH" in x86_64|amd64) ARCH="amd64" ;; arm64|aarch64) ARCH="arm64" ;; esac
 TARBALL="dist/${ID}-${OS}-${ARCH}.tar.gz"
 
 # Archive the CONTENTS of dist/<id>/ (binary + _internal/) at the root, so

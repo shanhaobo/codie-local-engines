@@ -85,9 +85,16 @@ jobs:
         id: art
         shell: bash
         run: |
+          # nullglob: a non-matching glob expands to NOTHING (instead of being
+          # passed literally to a command that then errors). Collect both archive
+          # kinds into an array and take the first — no `ls`, so no pipefail/-e
+          # death when only one of the two globs matches (the original bug:
+          # GNU ls exit 2 / BSD ls exit 1 on the unmatched .tar.gz|.zip glob).
+          shopt -s nullglob
           engine="${{ steps.meta.outputs.engine }}"
-          f=$(ls local_engines/*/dist/${engine}-*.zip local_engines/*/dist/${engine}-*.tar.gz 2>/dev/null | head -1)
-          if [[ -z "$f" ]]; then echo "::error::no artifact found for $engine"; exit 1; fi
+          files=( local_engines/*/dist/${engine}-*.zip local_engines/*/dist/${engine}-*.tar.gz )
+          if [[ ${#files[@]} -eq 0 ]]; then echo "::error::no artifact found for $engine"; exit 1; fi
+          f="${files[0]}"
           if command -v shasum >/dev/null 2>&1; then shasum -a 256 "$f" > "$f.sha256"; else sha256sum "$f" > "$f.sha256"; fi
           echo "path=$f" >> "$GITHUB_OUTPUT"
           echo "sha=$f.sha256" >> "$GITHUB_OUTPUT"
