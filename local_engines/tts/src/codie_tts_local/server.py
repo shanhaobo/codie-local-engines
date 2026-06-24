@@ -16,6 +16,7 @@ downloaded on first use (honoring HF_ENDPOINT) and cached per voice id.
 from __future__ import annotations
 
 import io
+import os
 import threading
 import wave
 
@@ -23,7 +24,71 @@ from fastapi import FastAPI, HTTPException
 from fastapi.responses import Response
 from pydantic import BaseModel
 
-from codie_tts_local.voices import ensure_voice
+from codie_tts_local.voices import _repo_paths, ensure_voice, with_quality
+
+# Catalog voices the Bridge AI 工具 page lists (and asks status for).
+_CATALOG = ["en_US-amy", "en_US-ryan", "zh_CN-huayan"]
+
+
+def _voice_files(voices_dir: str, voice: str) -> tuple[str, str]:
+    """Local (onnx, onnx.json) paths for `voice` under `voices_dir`."""
+    onnx_rel, json_rel = _repo_paths(with_quality(voice))
+    return (
+        os.path.join(voices_dir, onnx_rel.replace("/", os.sep)),
+        os.path.join(voices_dir, json_rel.replace("/", os.sep)),
+    )
+
+
+def _is_cached(voices_dir: str, voice: str) -> bool:
+    try:
+        onnx, _json = _voice_files(voices_dir, voice)
+        return os.path.exists(onnx)
+    except Exception:
+        return False
+
+
+def _cached_bytes(voices_dir: str, voice: str) -> int:
+    total = 0
+    try:
+        for p in _voice_files(voices_dir, voice):
+            if os.path.exists(p):
+                total += os.path.getsize(p)
+    except Exception:
+        pass
+    return total
+
+
+class Downloads:
+    """Tracks in-flight background voice downloads by id, thread-safely."""
+
+    def __init__(self, voices_dir: str) -> None:
+        self._voices_dir = voices_dir
+        self._lock = threading.Lock()
+        self._active: set[str] = set()
+
+    def is_downloading(self, voice: str) -> bool:
+        with self._lock:
+            return voice in self._active
+
+    def start(self, voice: str) -> str:
+        if _is_cached(self._voices_dir, voice):
+            return "exists"
+        with self._lock:
+            if voice in self._active:
+                return "downloading"
+            self._active.add(voice)
+
+        def _run() -> None:
+            try:
+                ensure_voice(voice, self._voices_dir)
+            except Exception:  # noqa: BLE001 — surfaced via status (downloaded stays false)
+                pass
+            finally:
+                with self._lock:
+                    self._active.discard(voice)
+
+        threading.Thread(target=_run, name=f"dl-{voice}", daemon=True).start()
+        return "started"
 
 
 class SpeechRequest(BaseModel):
@@ -76,12 +141,33 @@ def _synthesize_wav(voice, text: str) -> bytes:
 
 
 def build_app(*, voices_dir: str) -> FastAPI:
-    app = FastAPI(title="codie-tts-local", version="0.1.0")
+    app = FastAPI(title="codie-tts-local", version="0.1.1")
     cache = VoiceCache(voices_dir)
+    downloads = Downloads(voices_dir)
 
     @app.get("/health")
     def health() -> dict:
         return {"status": "ok"}
+
+    @app.get("/v1/models")
+    def list_models() -> dict:
+        """Per-voice download status for the Bridge AI 工具 page."""
+        return {
+            "models": [
+                {
+                    "name": v,
+                    "downloaded": _is_cached(voices_dir, v),
+                    "downloading": downloads.is_downloading(v),
+                    "bytes": _cached_bytes(voices_dir, v),
+                }
+                for v in _CATALOG
+            ]
+        }
+
+    @app.post("/v1/models/{name}/download")
+    def download_voice_route(name: str) -> dict:
+        """Deliberately pre-fetch a voice (background). Idempotent."""
+        return {"name": name, "status": downloads.start(name)}
 
     @app.post("/v1/audio/speech")
     def speech(req: SpeechRequest) -> Response:

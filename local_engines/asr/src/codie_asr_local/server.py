@@ -23,6 +23,16 @@ import threading
 
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 
+# Catalog whisper variants the Bridge AI 工具 page lists (and asks status for),
+# in the `whisper-<size>` form the catalog uses. GET /v1/models reports each.
+_CATALOG = [
+    "whisper-tiny",
+    "whisper-base",
+    "whisper-small",
+    "whisper-medium",
+    "whisper-large-v3",
+]
+
 # faster-whisper sizes we accept after stripping the catalog's `whisper-` prefix.
 _KNOWN_SIZES = {
     "tiny",
@@ -46,6 +56,73 @@ def _normalize_model(name: str) -> str:
     if n.startswith("whisper-"):
         n = n[len("whisper-") :]
     return n or "small"
+
+
+def _download_model_fn():
+    """The faster-whisper download helper, across its module layouts (lazy)."""
+    try:
+        from faster_whisper import download_model  # type: ignore
+    except ImportError:  # pragma: no cover - older/newer layout
+        from faster_whisper.utils import download_model  # type: ignore
+    return download_model
+
+
+def _cached_path(model_dir: str, size: str):
+    """Local cache dir for `size` if already downloaded, else None.
+
+    Uses faster-whisper's own resolver with `local_files_only=True` so we don't
+    have to guess the HF repo/cache-dir naming — it returns the path when cached
+    and raises when not.
+    """
+    try:
+        return _download_model_fn()(size, cache_dir=model_dir, local_files_only=True)
+    except Exception:
+        return None
+
+
+def _dir_bytes(path: str) -> int:
+    total = 0
+    for root, _dirs, files in os.walk(path):
+        for f in files:
+            try:
+                total += os.path.getsize(os.path.join(root, f))
+            except OSError:
+                pass
+    return total
+
+
+class Downloads:
+    """Tracks in-flight background weight downloads by size, thread-safely."""
+
+    def __init__(self, model_dir: str) -> None:
+        self._model_dir = model_dir
+        self._lock = threading.Lock()
+        self._active: set[str] = set()
+
+    def is_downloading(self, size: str) -> bool:
+        with self._lock:
+            return size in self._active
+
+    def start(self, size: str) -> str:
+        """Begin a background download for `size`. Returns a status string."""
+        if _cached_path(self._model_dir, size) is not None:
+            return "exists"
+        with self._lock:
+            if size in self._active:
+                return "downloading"
+            self._active.add(size)
+
+        def _run() -> None:
+            try:
+                _download_model_fn()(size, cache_dir=self._model_dir)
+            except Exception:  # noqa: BLE001 — surfaced via status (downloaded stays false)
+                pass
+            finally:
+                with self._lock:
+                    self._active.discard(size)
+
+        threading.Thread(target=_run, name=f"dl-{size}", daemon=True).start()
+        return "started"
 
 
 class ModelCache:
@@ -97,12 +174,40 @@ class ModelCache:
 
 
 def build_app(*, model_dir: str) -> FastAPI:
-    app = FastAPI(title="codie-asr-local", version="0.1.0")
+    app = FastAPI(title="codie-asr-local", version="0.1.1")
     cache = ModelCache(model_dir)
+    downloads = Downloads(model_dir)
 
     @app.get("/health")
     def health() -> dict:
         return {"status": "ok"}
+
+    @app.get("/v1/models")
+    def list_models() -> dict:
+        """Per-variant download status, for the Bridge AI 工具 page to show
+        which weights are already local (vs lazy-on-first-use)."""
+        out = []
+        for name in _CATALOG:
+            size = _normalize_model(name)
+            path = _cached_path(model_dir, size)
+            out.append(
+                {
+                    "name": name,
+                    "downloaded": path is not None,
+                    "downloading": downloads.is_downloading(size),
+                    "bytes": _dir_bytes(path) if path else 0,
+                }
+            )
+        return {"models": out}
+
+    @app.post("/v1/models/{name}/download")
+    def download_model_route(name: str) -> dict:
+        """Deliberately pre-fetch a variant's weights (background). Idempotent:
+        returns `exists` when already cached, `downloading` when in flight."""
+        size = _normalize_model(name)
+        if size not in _KNOWN_SIZES:
+            raise HTTPException(status_code=400, detail=f"unknown whisper model {name!r}")
+        return {"name": name, "status": downloads.start(size)}
 
     @app.post("/v1/audio/transcriptions")
     async def transcribe(
