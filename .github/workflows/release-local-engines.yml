@@ -120,3 +120,112 @@ jobs:
           files: |
             ${{ steps.art.outputs.path }}
             ${{ steps.art.outputs.sha }}
+
+  # After all three platform builds succeed, assemble the manifest.json the Bridge
+  # reads to drive manifest-based install/update + protocol gating. One manifest per
+  # release (per engine tag). We recompute every sha256 here from the actual archive
+  # contents — we do NOT trust the per-job .sha256 sidecars — so the manifest is the
+  # single fail-closed integrity anchor the Bridge verifies against.
+  #
+  # `needs: build` requires ALL matrix legs to succeed, so a partial release never
+  # gets a manifest (the Bridge would otherwise download an asset the manifest can't
+  # vouch for). Contract consumed by codie-agent-bridge LocalEngineManager /
+  # EngineReleasePort.latestManifest — keys windows-amd64 / macos-arm64 / macos-amd64.
+  manifest:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Resolve engine + tag
+        id: meta
+        shell: bash
+        run: |
+          if [[ "${GITHUB_EVENT_NAME}" == "workflow_dispatch" ]]; then
+            engine="${{ github.event.inputs.engine }}"
+            tag="${{ github.event.inputs.tag }}"
+          else
+            tag="${GITHUB_REF_NAME}"
+            case "$tag" in
+              codie-asr-local-*) engine="codie-asr-local" ;;
+              codie-tts-local-*) engine="codie-tts-local" ;;
+              *) echo "::error::unrecognized tag '$tag'"; exit 1 ;;
+            esac
+          fi
+          echo "engine=$engine" >> "$GITHUB_OUTPUT"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+
+      - name: Download all build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Assemble manifest.json
+        id: man
+        shell: bash
+        run: |
+          set -euo pipefail
+          engine="${{ steps.meta.outputs.engine }}"
+          tag="${{ steps.meta.outputs.tag }}"
+          if [[ -z "$tag" ]]; then
+            echo "no tag (build-only run) — skipping manifest"; exit 0
+          fi
+          ver="${tag##*-v}"            # codie-asr-local-v0.1.3 -> 0.1.3 (bare X.Y.Z)
+
+          # Per-engine protocol version. Bump ONLY on a breaking wrapper-contract
+          # change (startup args / /health / /v1/* shape) AND bump the matching
+          # spec.bridgeProtocol in codie-agent-bridge in the same change, else users
+          # see "请升级 Bridge" (bridgeOutdated). Both engines are protocol 1 today.
+          case "$engine" in
+            codie-asr-local) proto=1 ;;
+            codie-tts-local) proto=1 ;;
+            *) echo "::error::unknown engine '$engine'"; exit 1 ;;
+          esac
+
+          win="${engine}-windows-amd64.zip"
+          marm="${engine}-macos-arm64.tar.gz"
+          mamd="${engine}-macos-amd64.tar.gz"
+
+          # Locate each asset among the downloaded artifacts (nested under
+          # artifacts/<artifact-name>/...); match by basename.
+          find_asset() {
+            local p
+            p="$(find artifacts -type f -name "$1" | head -n1)"
+            [[ -n "$p" ]] || { echo "::error::missing asset '$1' among build artifacts"; exit 1; }
+            printf '%s' "$p"
+          }
+          wp="$(find_asset "$win")"
+          ap="$(find_asset "$marm")"
+          mp="$(find_asset "$mamd")"
+
+          sha() { sha256sum "$1" | awk '{print $1}'; }
+
+          cat > manifest.json <<EOF
+          {
+            "version": "${ver}",
+            "protocol": ${proto},
+            "assets": {
+              "windows-amd64": { "file": "${win}",  "sha256": "$(sha "$wp")" },
+              "macos-arm64":   { "file": "${marm}", "sha256": "$(sha "$ap")" },
+              "macos-amd64":   { "file": "${mamd}", "sha256": "$(sha "$mp")" }
+            }
+          }
+          EOF
+          echo "--- manifest.json ---"; cat manifest.json
+          # Fail-closed self-check: reject empty/short sha256 before publishing.
+          python3 -c "
+          import json,sys
+          m=json.load(open('manifest.json'))
+          assert isinstance(m['protocol'],int), 'protocol must be int'
+          assert m['version'].count('.')==2, 'version must be X.Y.Z'
+          for k,a in m['assets'].items():
+              assert len(a['sha256'])==64, f'{k}: bad sha256 {a[\"sha256\"]!r}'
+          print('manifest ok')
+          "
+
+      - name: Publish manifest to release
+        if: steps.meta.outputs.tag != ''
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.meta.outputs.tag }}
+          files: manifest.json
