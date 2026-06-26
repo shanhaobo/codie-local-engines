@@ -141,7 +141,7 @@ def _synthesize_wav(voice, text: str) -> bytes:
 
 
 def build_app(*, voices_dir: str) -> FastAPI:
-    app = FastAPI(title="codie-tts-local", version="0.1.1")
+    app = FastAPI(title="codie-tts-local", version="0.1.2")
     cache = VoiceCache(voices_dir)
     downloads = Downloads(voices_dir)
 

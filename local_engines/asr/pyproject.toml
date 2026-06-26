@@ -1,6 +1,6 @@
 [project]
 name = "codie-asr-local"
-version = "0.1.1"
+version = "0.1.2"
 description = "Local ASR sidecar: faster-whisper behind an OpenAI-compatible /v1/audio/transcriptions HTTP server, run natively on the host by the Bridge."
 requires-python = ">=3.11"
 dependencies = [

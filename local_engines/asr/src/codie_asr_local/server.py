@@ -174,7 +174,7 @@ class ModelCache:
 
 
 def build_app(*, model_dir: str) -> FastAPI:
-    app = FastAPI(title="codie-asr-local", version="0.1.1")
+    app = FastAPI(title="codie-asr-local", version="0.1.2")
     cache = ModelCache(model_dir)
     downloads = Downloads(model_dir)
 
