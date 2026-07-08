@@ -59,3 +59,34 @@ def test_transcribe_empty_file_400(tmp_path, monkeypatch):
         data={"model": "sensevoice-small"},
     )
     assert r.status_code == 400
+
+
+def test_transcribe_model_not_downloaded_409(tmp_path, monkeypatch):
+    # Model catalog-valid + non-empty upload, but weights absent -> 409 asking
+    # the caller to download first (never a decode/transcribe attempt).
+    monkeypatch.setattr(server, "_is_cached", lambda md, name: False)
+    c = TestClient(server.build_app(model_dir=str(tmp_path)))
+    r = c.post(
+        "/v1/audio/transcriptions",
+        files={"file": ("a.wav", _wav_bytes(), "audio/wav")},
+        data={"model": "sensevoice-small"},
+    )
+    assert r.status_code == 409
+
+
+def test_transcribe_decode_error_500(tmp_path, monkeypatch):
+    # Cached model, but decode blows up on garbage audio -> surfaced as 500.
+    monkeypatch.setattr(server, "_is_cached", lambda md, name: True)
+    monkeypatch.setattr(server.ModelCache, "get", lambda self, name: _FakeRecognizer())
+
+    def _boom(data):
+        raise RuntimeError("bad audio")
+
+    monkeypatch.setattr(server, "decode_to_16k_mono", _boom)
+    c = TestClient(server.build_app(model_dir=str(tmp_path)))
+    r = c.post(
+        "/v1/audio/transcriptions",
+        files={"file": ("a.wav", _wav_bytes(), "audio/wav")},
+        data={"model": "sensevoice-small"},
+    )
+    assert r.status_code == 500

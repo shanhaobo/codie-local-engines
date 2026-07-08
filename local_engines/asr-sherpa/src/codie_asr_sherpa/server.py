@@ -15,7 +15,6 @@ Design notes:
 
 from __future__ import annotations
 
-import bz2
 import io
 import os
 import shutil
@@ -26,8 +25,6 @@ import urllib.request
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 
 from codie_asr_sherpa.audio import decode_to_16k_mono
-
-_CATALOG = ["sensevoice-small"]
 
 # name -> where the weights come from. `dir` is the folder we extract into under
 # model_dir; `files` are the required members that must exist for "downloaded".
@@ -43,6 +40,10 @@ _MODEL_SOURCES = {
         "files": ["model.int8.onnx", "tokens.txt"],
     },
 }
+
+# The variants GET /v1/models reports, derived from the source table (single
+# source of truth — never drift from _MODEL_SOURCES).
+_CATALOG = list(_MODEL_SOURCES)
 
 _DEFAULT_BASE = "https://github.com"
 
@@ -80,23 +81,41 @@ def _fetch_bytes(url: str) -> bytes:
 
 def _extract_flatten(raw: bytes, dest_dir: str, required: list[str]) -> None:
     """Extract a .tar.bz2 whose members sit under one top-level dir, flattening
-    the required files to `dest_dir/<basename>`."""
-    os.makedirs(dest_dir, exist_ok=True)
+    the required files to `dest_dir/<basename>`.
+
+    Atomic: files are staged into a sibling `<dest_dir>.part` dir and only
+    published to `dest_dir` (via os.replace) once every required file is present.
+    So `_is_cached` never observes a truncated/partial model — a crash mid-write
+    or a missing member leaves `dest_dir` untouched (still "not downloaded"),
+    which lets a later `Downloads.start` retry instead of stranding the user on a
+    corrupt "downloaded" dir.
+    """
+    staging = dest_dir + ".part"
+    shutil.rmtree(staging, ignore_errors=True)  # drop any stale partial
+    os.makedirs(staging, exist_ok=True)
     wanted = set(required)
-    with tarfile.open(fileobj=bz2.BZ2File(io.BytesIO(raw)), mode="r:") as tf:
-        for member in tf.getmembers():
-            if not member.isfile():
-                continue
-            base = os.path.basename(member.name)
-            if base in wanted:
-                src = tf.extractfile(member)
-                if src is None:
+    try:
+        # tarfile decompresses bz2 natively via `r:bz2` — no bz2.BZ2File wrapper.
+        with tarfile.open(fileobj=io.BytesIO(raw), mode="r:bz2") as tf:
+            for member in tf.getmembers():
+                if not member.isfile():
                     continue
-                with open(os.path.join(dest_dir, base), "wb") as out:
-                    shutil.copyfileobj(src, out)
-    missing = [f for f in required if not os.path.isfile(os.path.join(dest_dir, f))]
-    if missing:
-        raise RuntimeError(f"tarball missing required files: {missing}")
+                base = os.path.basename(member.name)
+                if base in wanted:
+                    src = tf.extractfile(member)
+                    if src is None:
+                        continue
+                    with open(os.path.join(staging, base), "wb") as out:
+                        shutil.copyfileobj(src, out)
+        missing = [f for f in required if not os.path.isfile(os.path.join(staging, f))]
+        if missing:
+            raise RuntimeError(f"tarball missing required files: {missing}")
+        # Atomic publish: dest_dir is absent here (start() short-circuits on a
+        # complete cache), so this rename exposes only the fully-staged dir.
+        shutil.rmtree(dest_dir, ignore_errors=True)
+        os.replace(staging, dest_dir)
+    finally:
+        shutil.rmtree(staging, ignore_errors=True)
 
 
 class Downloads:
@@ -149,6 +168,9 @@ class _Recognizer:
         self._r = recognizer
 
     def transcribe(self, samples, language=None) -> str:
+        # `language` is accepted for OpenAI-contract symmetry but intentionally
+        # ignored: SenseVoice auto-detects language (zh/en/ja/ko/yue), so there's
+        # no per-request language knob to forward to the recognizer.
         s = self._r.create_stream()
         s.accept_waveform(16000, samples)
         self._r.decode_stream(s)
@@ -161,7 +183,7 @@ class ModelCache:
     def __init__(self, model_dir: str) -> None:
         self._model_dir = model_dir
         self._lock = threading.Lock()
-        self._models: dict = {}
+        self._models: dict[str, _Recognizer] = {}
 
     def get(self, name: str) -> "_Recognizer":
         with self._lock:
