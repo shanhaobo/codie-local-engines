@@ -4,8 +4,9 @@ name: Release local engine sidecars
 # publishes them as release assets the Bridge downloads at runtime.
 #
 # Per-engine release tags (so each engine versions independently):
-#   codie-asr-local-vX.Y.Z   -> builds local_engines/asr  (faster-whisper)
-#   codie-tts-local-vX.Y.Z    -> builds local_engines/tts  (Piper)
+#   codie-asr-local-vX.Y.Z    -> builds local_engines/asr         (faster-whisper)
+#   codie-asr-sherpa-vX.Y.Z   -> builds local_engines/asr-sherpa  (sherpa-onnx / SenseVoice)
+#   codie-tts-local-vX.Y.Z    -> builds local_engines/tts         (Piper)
 #
 # Each tag fans out to windows-x64 + macos-arm64 + macos-x64; every job uploads
 # its archive plus a .sha256 sidecar to the release for that tag. The Bridge
@@ -179,7 +180,7 @@ jobs:
           # Per-engine protocol version. Bump ONLY on a breaking wrapper-contract
           # change (startup args / /health / /v1/* shape) AND bump the matching
           # spec.bridgeProtocol in codie-agent-bridge in the same change, else users
-          # see "请升级 Bridge" (bridgeOutdated). Both engines are protocol 1 today.
+          # see "请升级 Bridge" (bridgeOutdated). All three engines are protocol 1 today.
           case "$engine" in
             codie-asr-local) proto=1 ;;
             codie-asr-sherpa) proto=1 ;;
