@@ -1,0 +1,37 @@
+[project]
+name = "codie-asr-sherpa"
+version = "0.1.0"
+description = "Local ASR sidecar: sherpa-onnx (SenseVoice) behind an OpenAI-compatible /v1/audio/transcriptions HTTP server, run natively on the host by the Bridge."
+requires-python = ">=3.11"
+dependencies = [
+    "sherpa-onnx>=1.10",
+    "fastapi>=0.110",
+    "uvicorn>=0.27",
+    "python-multipart>=0.0.9",
+    "av>=12",
+    "numpy>=1.24",
+]
+
+[project.optional-dependencies]
+# Symmetry with host_mcp/asr build scripts (`.[dev,mac]` / `.[dev,win]`).
+mac = []
+win = []
+dev = [
+    "pyinstaller>=6.0",
+    "httpx>=0.26",
+    "pytest>=8.0",
+]
+
+[project.scripts]
+codie-asr-sherpa = "codie_asr_sherpa.__main__:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/codie_asr_sherpa"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
