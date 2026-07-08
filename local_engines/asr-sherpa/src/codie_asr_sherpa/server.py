@@ -25,6 +25,8 @@ import urllib.request
 
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 
+from codie_asr_sherpa.audio import decode_to_16k_mono
+
 _CATALOG = ["sensevoice-small"]
 
 # name -> where the weights come from. `dir` is the folder we extract into under
@@ -140,9 +142,55 @@ class Downloads:
             t.join(timeout)
 
 
+class _Recognizer:
+    """Thin wrapper over sherpa_onnx OfflineRecognizer with a `transcribe` seam."""
+
+    def __init__(self, recognizer) -> None:
+        self._r = recognizer
+
+    def transcribe(self, samples, language=None) -> str:
+        s = self._r.create_stream()
+        s.accept_waveform(16000, samples)
+        self._r.decode_stream(s)
+        return (s.result.text or "").strip()
+
+
+class ModelCache:
+    """Lazily loads and caches the sherpa-onnx recognizer by model name."""
+
+    def __init__(self, model_dir: str) -> None:
+        self._model_dir = model_dir
+        self._lock = threading.Lock()
+        self._models: dict = {}
+
+    def get(self, name: str) -> "_Recognizer":
+        with self._lock:
+            cached = self._models.get(name)
+            if cached is not None:
+                return cached
+            # Lazy import: keeps app construction + /health free of the heavy
+            # sherpa_onnx import graph.
+            import sherpa_onnx
+
+            d = _model_dir_for(self._model_dir, name)
+            provider = os.environ.get("CODIE_SHERPA_PROVIDER", "cpu")
+            recognizer = sherpa_onnx.OfflineRecognizer.from_sense_voice(
+                model=os.path.join(d, "model.int8.onnx"),
+                tokens=os.path.join(d, "tokens.txt"),
+                num_threads=int(os.environ.get("CODIE_SHERPA_THREADS", "2")),
+                use_itn=True,
+                provider=provider,
+                debug=False,
+            )
+            wrapped = _Recognizer(recognizer)
+            self._models[name] = wrapped
+            return wrapped
+
+
 def build_app(*, model_dir: str) -> FastAPI:
     app = FastAPI(title="codie-asr-sherpa", version="0.1.0")
     downloads = Downloads(model_dir)
+    cache = ModelCache(model_dir)
 
     @app.get("/health")
     def health() -> dict:
@@ -169,5 +217,28 @@ def build_app(*, model_dir: str) -> FastAPI:
         if name not in _MODEL_SOURCES:
             raise HTTPException(status_code=400, detail=f"unknown model {name!r}")
         return {"name": name, "status": downloads.start(name)}
+
+    @app.post("/v1/audio/transcriptions")
+    async def transcribe(
+        file: UploadFile = File(...),
+        model: str = Form("sensevoice-small"),
+        language: str | None = Form(None),
+    ) -> dict:
+        if model not in _MODEL_SOURCES:
+            raise HTTPException(status_code=400, detail=f"unknown model {model!r}")
+        data = await file.read()
+        if not data:
+            raise HTTPException(status_code=400, detail="empty audio file")
+        if not _is_cached(model_dir, model):
+            raise HTTPException(
+                status_code=409,
+                detail=f"model {model!r} not downloaded — POST /v1/models/{model}/download first",
+            )
+        try:
+            samples = decode_to_16k_mono(data)
+            text = cache.get(model).transcribe(samples, language=language)
+        except Exception as e:  # noqa: BLE001 — surface decode/transcribe errors
+            raise HTTPException(status_code=500, detail=f"transcription failed: {e}")
+        return {"text": text}
 
     return app
