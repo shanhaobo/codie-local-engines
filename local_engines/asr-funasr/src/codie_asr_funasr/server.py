@@ -63,29 +63,34 @@ def _dir_bytes(path: str) -> int:
     return total
 
 
+def _snapshot_download(model_id: str, revision: str, dest_dir: str) -> None:
+    """Fetch a ModelScope snapshot into dest_dir. Seam for tests to monkeypatch —
+    replacing this whole function means the test suite never imports modelscope."""
+    # Lazy import: modelscope pulls a heavy graph; keep it out of app construction.
+    from modelscope import snapshot_download
+
+    base = os.environ.get("CODIE_FUNASR_MODEL_BASE")  # optional mirror host
+    if base:
+        os.environ.setdefault("MODELSCOPE_DOMAIN", base)
+    snapshot_download(model_id, revision=revision, local_dir=dest_dir)
+
+
 def _download_model(model_dir: str, name: str) -> None:
-    """Download the ModelScope snapshot into <model_dir>/<dir>. Seam for tests.
+    """Download the ModelScope snapshot into <model_dir>/<dir>.
 
     Atomic: snapshot into a sibling `<dest>.part` and only `os.replace` to `dest`
     once the required files are present, so `_is_cached` never observes a partial
     download (a crash mid-fetch leaves `dest` untouched -> still "not downloaded",
     so a later retry works instead of stranding a corrupt "downloaded" dir).
     """
-    # Lazy import: modelscope pulls a heavy graph; keep it out of app construction.
-    from modelscope import snapshot_download
-
     src = _MODEL_SOURCES[name]
     dest = _model_dir_for(model_dir, name)
     staging = dest + ".part"
     shutil.rmtree(staging, ignore_errors=True)
     os.makedirs(staging, exist_ok=True)
 
-    base = os.environ.get("CODIE_FUNASR_MODEL_BASE")  # optional mirror host
-    if base:
-        os.environ.setdefault("MODELSCOPE_DOMAIN", base)
-
     try:
-        snapshot_download(src["model_id"], revision=src["revision"], local_dir=staging)
+        _snapshot_download(src["model_id"], src["revision"], staging)
         missing = [f for f in src["files"] if not os.path.isfile(os.path.join(staging, f))]
         if missing:
             raise RuntimeError(f"snapshot missing required files: {missing}")
