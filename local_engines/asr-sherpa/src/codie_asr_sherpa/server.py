@@ -110,8 +110,9 @@ def _extract_flatten(raw: bytes, dest_dir: str, required: list[str]) -> None:
         missing = [f for f in required if not os.path.isfile(os.path.join(staging, f))]
         if missing:
             raise RuntimeError(f"tarball missing required files: {missing}")
-        # Atomic publish: dest_dir is absent here (start() short-circuits on a
-        # complete cache), so this rename exposes only the fully-staged dir.
+        # Atomic publish: dest_dir may be a present-but-incomplete leftover from a
+        # prior crash/partial run, so rmtree it first (this is load-bearing); the
+        # rename then exposes only the fully-staged dir.
         shutil.rmtree(dest_dir, ignore_errors=True)
         os.replace(staging, dest_dir)
     finally:
