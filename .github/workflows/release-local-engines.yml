@@ -6,10 +6,12 @@ name: Release local engine sidecars
 # Per-engine release tags (so each engine versions independently):
 #   codie-asr-local-vX.Y.Z    -> builds local_engines/asr         (faster-whisper)
 #   codie-asr-sherpa-vX.Y.Z   -> builds local_engines/asr-sherpa  (sherpa-onnx / SenseVoice)
+#   codie-asr-funasr-vX.Y.Z   -> builds local_engines/asr-funasr  (FunASR / Paraformer-zh, torch)
 #   codie-tts-local-vX.Y.Z    -> builds local_engines/tts         (Piper)
 #
-# Each tag fans out to windows-x64 + macos-arm64 + macos-x64; every job uploads
-# its archive plus a .sha256 sidecar to the release for that tag. The Bridge
+# Each tag fans out to its engine's declared platform set (computed once by the
+# `preflight` job below — see its per-engine table); every leg uploads its
+# archive plus a .sha256 sidecar to the release for that tag. The Bridge
 # composes the download URL from the configurable ghcrNamespace (GitHub owner)
 # + repo + tag + per-OS artifact name.
 
@@ -18,6 +20,7 @@ on:
     tags:
       - 'codie-asr-local-v*'
       - 'codie-asr-sherpa-v*'
+      - 'codie-asr-funasr-v*'
       - 'codie-tts-local-v*'
   # Manual runs for testing: pick the engine; produces a draft release on the
   # chosen tag if one is supplied, else just builds (no upload).
@@ -26,7 +29,7 @@ on:
       engine:
         description: 'Engine to build'
         type: choice
-        options: [codie-asr-local, codie-asr-sherpa, codie-tts-local]
+        options: [codie-asr-local, codie-asr-sherpa, codie-asr-funasr, codie-tts-local]
         required: true
       tag:
         description: 'Release tag to upload to (blank = build only, no upload)'
@@ -36,23 +39,23 @@ permissions:
   contents: write   # create the release + upload assets
 
 jobs:
-  build:
-    strategy:
-      fail-fast: false
-      # windows-latest = amd64; macos-14 = Apple Silicon arm64; macos-15-intel =
-      # Intel amd64. (macos-13 was retired by GitHub in Dec 2025 — jobs requesting
-      # it queue forever; macos-15-intel is the current/last Intel image, to 2027.)
-      matrix:
-        os: [windows-latest, macos-14, macos-15-intel]
-    runs-on: ${{ matrix.os }}
+  # Resolves the engine once and fans out its platform set + manifest asset
+  # keys + python version, so `build`'s matrix and `manifest`'s asset lookup
+  # both key off ONE source of truth instead of duplicating a per-engine
+  # platform list in two jobs (the pre-funasr version of this workflow did —
+  # and hardcoded exactly 3 platforms into the manifest step, which would have
+  # hard-failed a funasr release missing macos-amd64).
+  preflight:
+    runs-on: ubuntu-latest
+    outputs:
+      engine: ${{ steps.meta.outputs.engine }}
+      script: ${{ steps.meta.outputs.script }}
+      tag: ${{ steps.meta.outputs.tag }}
+      python_version: ${{ steps.meta.outputs.python_version }}
+      os_matrix: ${{ steps.meta.outputs.os_matrix }}
+      asset_keys: ${{ steps.meta.outputs.asset_keys }}
     steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.13'
-
-      - name: Resolve engine + tag
+      - name: Resolve engine + tag + platform set
         id: meta
         shell: bash
         run: |
@@ -64,6 +67,7 @@ jobs:
             case "$tag" in
               codie-asr-local-*) engine="codie-asr-local" ;;
               codie-asr-sherpa-*) engine="codie-asr-sherpa" ;;
+              codie-asr-funasr-*) engine="codie-asr-funasr" ;;
               codie-tts-local-*) engine="codie-tts-local" ;;
               *) echo "::error::unrecognized tag '$tag'"; exit 1 ;;
             esac
@@ -71,22 +75,62 @@ jobs:
           case "$engine" in
             codie-asr-local) script="build-asr-sidecar" ;;
             codie-asr-sherpa) script="build-asr-sherpa-sidecar" ;;
+            codie-asr-funasr) script="build-asr-funasr-sidecar" ;;
             codie-tts-local) script="build-tts-sidecar" ;;
             *) echo "::error::unknown engine '$engine'"; exit 1 ;;
           esac
+          # windows-latest = amd64; macos-14 = Apple Silicon arm64; macos-15-intel =
+          # Intel amd64. (macos-13 was retired by GitHub in Dec 2025 — jobs requesting
+          # it queue forever; macos-15-intel is the current/last Intel image, to 2027.)
+          #
+          # codie-asr-funasr ships macos-arm64 ONLY for now:
+          #  - torch has shipped no macOS-x86_64 wheel since 2.2.2, so macos-amd64
+          #    is unbuildable with the real (torch-backed) funasr package.
+          #  - Windows torch+funasr hasn't been spiked yet — add windows-latest here
+          #    (and the matching asset key) once it's proven, per
+          #    docs/plans/2026-07-08-funasr-asr-engine.md Phase 3.
+          # Also needs Python 3.11 (not 3.13): confirmed by the local spike — the
+          # funasr/torch/modelscope dep tree resolves as wheels on 3.11 on
+          # macos-arm64; no cp313 wheels were available at spike time.
+          if [[ "$engine" == "codie-asr-funasr" ]]; then
+            python_version='3.11'
+            os_matrix='["macos-14"]'
+            asset_keys='["macos-arm64"]'
+          else
+            python_version='3.13'
+            os_matrix='["windows-latest","macos-14","macos-15-intel"]'
+            asset_keys='["windows-amd64","macos-arm64","macos-amd64"]'
+          fi
           echo "engine=$engine" >> "$GITHUB_OUTPUT"
           echo "script=$script" >> "$GITHUB_OUTPUT"
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "python_version=$python_version" >> "$GITHUB_OUTPUT"
+          echo "os_matrix=$os_matrix" >> "$GITHUB_OUTPUT"
+          echo "asset_keys=$asset_keys" >> "$GITHUB_OUTPUT"
+
+  build:
+    needs: preflight
+    strategy:
+      fail-fast: false
+      matrix:
+        os: ${{ fromJson(needs.preflight.outputs.os_matrix) }}
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ needs.preflight.outputs.python_version }}
 
       - name: Build (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
-        run: ./scripts/${{ steps.meta.outputs.script }}.ps1
+        run: ./scripts/${{ needs.preflight.outputs.script }}.ps1
 
       - name: Build (macOS)
         if: runner.os == 'macOS'
         shell: bash
-        run: bash ./scripts/${{ steps.meta.outputs.script }}.sh
+        run: bash ./scripts/${{ needs.preflight.outputs.script }}.sh
 
       - name: Locate artifact + checksum
         id: art
@@ -98,7 +142,7 @@ jobs:
           # death when only one of the two globs matches (the original bug:
           # GNU ls exit 2 / BSD ls exit 1 on the unmatched .tar.gz|.zip glob).
           shopt -s nullglob
-          engine="${{ steps.meta.outputs.engine }}"
+          engine="${{ needs.preflight.outputs.engine }}"
           files=( local_engines/*/dist/${engine}-*.zip local_engines/*/dist/${engine}-*.tar.gz )
           if [[ ${#files[@]} -eq 0 ]]; then echo "::error::no artifact found for $engine"; exit 1; fi
           f="${files[0]}"
@@ -110,56 +154,41 @@ jobs:
       - name: Upload build artifact (always, for inspection)
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ steps.meta.outputs.engine }}-${{ matrix.os }}
+          name: ${{ needs.preflight.outputs.engine }}-${{ matrix.os }}
           path: |
             ${{ steps.art.outputs.path }}
             ${{ steps.art.outputs.sha }}
 
       - name: Publish to release
         # Only when a real tag is present (tag push, or dispatch with a tag).
-        if: steps.meta.outputs.tag != ''
+        if: needs.preflight.outputs.tag != ''
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ steps.meta.outputs.tag }}
+          tag_name: ${{ needs.preflight.outputs.tag }}
           files: |
             ${{ steps.art.outputs.path }}
             ${{ steps.art.outputs.sha }}
 
-  # After all three platform builds succeed, assemble the manifest.json the Bridge
-  # reads to drive manifest-based install/update + protocol gating. One manifest per
-  # release (per engine tag). We recompute every sha256 here from the actual archive
-  # contents — we do NOT trust the per-job .sha256 sidecars — so the manifest is the
-  # single fail-closed integrity anchor the Bridge verifies against.
+  # After every platform build in the engine's matrix succeeds, assemble the
+  # manifest.json the Bridge reads to drive manifest-based install/update +
+  # protocol gating. One manifest per release (per engine tag). We recompute
+  # every sha256 here from the actual archive contents — we do NOT trust the
+  # per-job .sha256 sidecars — so the manifest is the single fail-closed
+  # integrity anchor the Bridge verifies against.
   #
-  # `needs: build` requires ALL matrix legs to succeed, so a partial release never
-  # gets a manifest (the Bridge would otherwise download an asset the manifest can't
-  # vouch for). Contract consumed by codie-agent-bridge LocalEngineManager /
-  # EngineReleasePort.latestManifest — keys windows-amd64 / macos-arm64 / macos-amd64.
+  # `needs: build` requires every matrix leg in `preflight.outputs.os_matrix`
+  # to succeed, so a partial release never gets a manifest. Asset keys are
+  # DATA-DRIVEN from `preflight.outputs.asset_keys` (not a hardcoded 3), so an
+  # engine shipping fewer platforms (codie-asr-funasr: macos-arm64 only) gets a
+  # manifest with just that key — never fails on a platform it never builds.
+  # Contract consumed by codie-agent-bridge LocalEngineManager /
+  # EngineReleasePort.latestManifest.
   manifest:
-    needs: build
+    needs: [preflight, build]
     runs-on: ubuntu-latest
     permissions:
       contents: write
     steps:
-      - name: Resolve engine + tag
-        id: meta
-        shell: bash
-        run: |
-          if [[ "${GITHUB_EVENT_NAME}" == "workflow_dispatch" ]]; then
-            engine="${{ github.event.inputs.engine }}"
-            tag="${{ github.event.inputs.tag }}"
-          else
-            tag="${GITHUB_REF_NAME}"
-            case "$tag" in
-              codie-asr-local-*) engine="codie-asr-local" ;;
-              codie-asr-sherpa-*) engine="codie-asr-sherpa" ;;
-              codie-tts-local-*) engine="codie-tts-local" ;;
-              *) echo "::error::unrecognized tag '$tag'"; exit 1 ;;
-            esac
-          fi
-          echo "engine=$engine" >> "$GITHUB_OUTPUT"
-          echo "tag=$tag" >> "$GITHUB_OUTPUT"
-
       - name: Download all build artifacts
         uses: actions/download-artifact@v4
         with:
@@ -170,8 +199,8 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          engine="${{ steps.meta.outputs.engine }}"
-          tag="${{ steps.meta.outputs.tag }}"
+          engine="${{ needs.preflight.outputs.engine }}"
+          tag="${{ needs.preflight.outputs.tag }}"
           if [[ -z "$tag" ]]; then
             echo "no tag (build-only run) — skipping manifest"; exit 0
           fi
@@ -180,17 +209,14 @@ jobs:
           # Per-engine protocol version. Bump ONLY on a breaking wrapper-contract
           # change (startup args / /health / /v1/* shape) AND bump the matching
           # spec.bridgeProtocol in codie-agent-bridge in the same change, else users
-          # see "请升级 Bridge" (bridgeOutdated). All three engines are protocol 1 today.
+          # see "请升级 Bridge" (bridgeOutdated). All four engines are protocol 1 today.
           case "$engine" in
             codie-asr-local) proto=1 ;;
             codie-asr-sherpa) proto=1 ;;
+            codie-asr-funasr) proto=1 ;;
             codie-tts-local) proto=1 ;;
             *) echo "::error::unknown engine '$engine'"; exit 1 ;;
           esac
-
-          win="${engine}-windows-amd64.zip"
-          marm="${engine}-macos-arm64.tar.gz"
-          mamd="${engine}-macos-amd64.tar.gz"
 
           # Locate each asset among the downloaded artifacts (nested under
           # artifacts/<artifact-name>/...); match by basename.
@@ -200,38 +226,45 @@ jobs:
             [[ -n "$p" ]] || { echo "::error::missing asset '$1' among build artifacts"; exit 1; }
             printf '%s' "$p"
           }
-          wp="$(find_asset "$win")"
-          ap="$(find_asset "$marm")"
-          mp="$(find_asset "$mamd")"
-
           sha() { sha256sum "$1" | awk '{print $1}'; }
-
-          cat > manifest.json <<EOF
-          {
-            "version": "${ver}",
-            "protocol": ${proto},
-            "assets": {
-              "windows-amd64": { "file": "${win}",  "sha256": "$(sha "$wp")" },
-              "macos-arm64":   { "file": "${marm}", "sha256": "$(sha "$ap")" },
-              "macos-amd64":   { "file": "${mamd}", "sha256": "$(sha "$mp")" }
-            }
+          # Filename convention per asset key: zip on Windows, tar.gz on macOS.
+          filename_for() {
+            case "$1" in
+              windows-amd64) printf '%s-windows-amd64.zip' "$engine" ;;
+              macos-arm64)   printf '%s-macos-arm64.tar.gz' "$engine" ;;
+              macos-amd64)   printf '%s-macos-amd64.tar.gz' "$engine" ;;
+              *) echo "::error::unknown asset key '$1'"; exit 1 ;;
+            esac
           }
-          EOF
+
+          assets_json='{}'
+          for key in $(echo '${{ needs.preflight.outputs.asset_keys }}' | jq -r '.[]'); do
+            fname="$(filename_for "$key")"
+            fpath="$(find_asset "$fname")"
+            fsha="$(sha "$fpath")"
+            assets_json="$(echo "$assets_json" | jq --arg k "$key" --arg f "$fname" --arg s "$fsha" \
+              '. + {($k): {file: $f, sha256: $s}}')"
+          done
+
+          jq -n --arg version "$ver" --argjson protocol "$proto" --argjson assets "$assets_json" \
+            '{version: $version, protocol: $protocol, assets: $assets}' > manifest.json
+
           echo "--- manifest.json ---"; cat manifest.json
           # Fail-closed self-check: reject empty/short sha256 before publishing.
           python3 -c "
-          import json,sys
+          import json
           m=json.load(open('manifest.json'))
           assert isinstance(m['protocol'],int), 'protocol must be int'
           assert m['version'].count('.')==2, 'version must be X.Y.Z'
+          assert m['assets'], 'assets must be non-empty'
           for k,a in m['assets'].items():
               assert len(a['sha256'])==64, f'{k}: bad sha256 {a[\"sha256\"]!r}'
           print('manifest ok')
           "
 
       - name: Publish manifest to release
-        if: steps.meta.outputs.tag != ''
+        if: needs.preflight.outputs.tag != ''
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ steps.meta.outputs.tag }}
+          tag_name: ${{ needs.preflight.outputs.tag }}
           files: manifest.json
