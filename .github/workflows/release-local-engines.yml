@@ -16,6 +16,7 @@ on:
   push:
     tags:
       - 'codie-asr-local-v*'
+      - 'codie-asr-sherpa-v*'
       - 'codie-tts-local-v*'
   # Manual runs for testing: pick the engine; produces a draft release on the
   # chosen tag if one is supplied, else just builds (no upload).
@@ -24,7 +25,7 @@ on:
       engine:
         description: 'Engine to build'
         type: choice
-        options: [codie-asr-local, codie-tts-local]
+        options: [codie-asr-local, codie-asr-sherpa, codie-tts-local]
         required: true
       tag:
         description: 'Release tag to upload to (blank = build only, no upload)'
@@ -61,12 +62,14 @@ jobs:
             tag="${GITHUB_REF_NAME}"
             case "$tag" in
               codie-asr-local-*) engine="codie-asr-local" ;;
+              codie-asr-sherpa-*) engine="codie-asr-sherpa" ;;
               codie-tts-local-*) engine="codie-tts-local" ;;
               *) echo "::error::unrecognized tag '$tag'"; exit 1 ;;
             esac
           fi
           case "$engine" in
             codie-asr-local) script="build-asr-sidecar" ;;
+            codie-asr-sherpa) script="build-asr-sherpa-sidecar" ;;
             codie-tts-local) script="build-tts-sidecar" ;;
             *) echo "::error::unknown engine '$engine'"; exit 1 ;;
           esac
@@ -148,6 +151,7 @@ jobs:
             tag="${GITHUB_REF_NAME}"
             case "$tag" in
               codie-asr-local-*) engine="codie-asr-local" ;;
+              codie-asr-sherpa-*) engine="codie-asr-sherpa" ;;
               codie-tts-local-*) engine="codie-tts-local" ;;
               *) echo "::error::unrecognized tag '$tag'"; exit 1 ;;
             esac
@@ -178,6 +182,7 @@ jobs:
           # see "请升级 Bridge" (bridgeOutdated). Both engines are protocol 1 today.
           case "$engine" in
             codie-asr-local) proto=1 ;;
+            codie-asr-sherpa) proto=1 ;;
             codie-tts-local) proto=1 ;;
             *) echo "::error::unknown engine '$engine'"; exit 1 ;;
           esac
