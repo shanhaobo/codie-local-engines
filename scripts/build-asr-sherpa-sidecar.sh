@@ -1,0 +1,65 @@
+#!/usr/bin/env bash
+# Build the local sherpa-onnx ASR sidecar (our codie-asr-sherpa wrapper around
+# sherpa-onnx SenseVoice) into a distributable archive. Runtime-download delivery
+# (see build-asr-sidecar.sh header): produces dist/codie-asr-sherpa-<os>-<arch>.tar.gz
+# + prints its SHA-256, for an operator to upload and paste into LocalEngineSpec
+# (id codie-asr-sherpa, matching platform).
+#
+# The archive's root holds the launchable binary + _internal/, so the Bridge
+# can extract it straight into <dataDir>/ai-tools/codie-asr-sherpa/ and run
+# ./codie-asr-sherpa there.
+#
+# Usage:  bash scripts/build-asr-sherpa-sidecar.sh
+set -euo pipefail
+
+cd "$(dirname "$0")/../local_engines/asr-sherpa"
+ID="codie-asr-sherpa"
+
+if [[ ! -d .venv ]]; then
+  if command -v python3 >/dev/null 2>&1; then python3 -m venv .venv; else python -m venv .venv; fi
+fi
+if [[ -f .venv/Scripts/activate ]]; then source .venv/Scripts/activate; else source .venv/bin/activate; fi
+
+case "$(uname -s)" in
+  Darwin*) EXTRAS="dev,mac" ;;
+  MINGW*|MSYS*|CYGWIN*) EXTRAS="dev,win" ;;
+  *) EXTRAS="dev" ;;
+esac
+pip install -e ".[${EXTRAS}]" >/dev/null
+
+rm -rf build dist
+pyinstaller --clean --noconfirm codie_asr_sherpa.spec
+
+BUILT="dist/$ID"
+[[ -x "$BUILT/$ID" ]] || { echo "pyinstaller did not produce $BUILT/$ID" >&2; exit 1; }
+
+# Name the artifact by OS + arch.
+case "$(uname -s)" in
+  Darwin*) OS="macos" ;;
+  *) OS="linux" ;;
+esac
+# Normalize to amd64 / arm64 (uname -m is x86_64 on Intel, arm64/aarch64 on ARM).
+ARCH="$(uname -m)"
+case "$ARCH" in x86_64|amd64) ARCH="amd64" ;; arm64|aarch64) ARCH="arm64" ;; esac
+TARBALL="dist/${ID}-${OS}-${ARCH}.tar.gz"
+
+# Archive the CONTENTS of dist/<id>/ (binary + _internal/) at the root, so
+# extraction lands the binary directly at <dataDir>/ai-tools/<id>/<id>.
+rm -f "$TARBALL"
+tar -czf "$TARBALL" -C "$BUILT" .
+
+if command -v shasum >/dev/null 2>&1; then
+  SHA="$(shasum -a 256 "$TARBALL" | awk '{print $1}')"
+else
+  SHA="$(sha256sum "$TARBALL" | awk '{print $1}')"
+fi
+
+echo ""
+echo "[build-asr-sherpa-sidecar] done."
+echo "  artifact : $(cd "$(dirname "$TARBALL")" && pwd)/$(basename "$TARBALL")"
+echo "  sha256   : $SHA"
+echo ""
+echo "  Next: upload this archive to your release host, then set in"
+echo "  lib/models/local_engine_spec.dart (id codie-asr-sherpa, matching platform):"
+echo "    url:    '<download URL of the uploaded archive>'"
+echo "    sha256: '$SHA'"
