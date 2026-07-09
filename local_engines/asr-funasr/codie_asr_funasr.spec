@@ -31,7 +31,9 @@ for pkg in ("funasr", "modelscope", "transformers", "jieba"):
 
 # torch / torchaudio: native libs (libtorch, C-extensions) + data. The
 # hooks-contrib torch hook covers most; be explicit so the frozen bundle
-# carries the shared libs even if the hook under-collects.
+# carries the shared libs even if the hook under-collects. (torch's
+# *.dist-info/licenses/** deep tree that blows Windows MAX_PATH is stripped from
+# the FINAL data TOC after Analysis — see the a.datas filter below.)
 for pkg in ("torch", "torchaudio"):
     binaries += collect_dynamic_libs(pkg)
     datas += collect_data_files(pkg)
@@ -66,6 +68,21 @@ a = Analysis(
     cipher=block_cipher,
     noarchive=False,
 )
+
+# Windows MAX_PATH (260): several wheels (torch worst of all) ship a
+# *.dist-info/licenses/** third-party license tree nested absurdly deep — torch
+# reaches …/kineto/libkineto/…/prometheus-cpp/…/civetweb/…/duktape-1.5.2. Once
+# prefixed with the onedir output dir it exceeds 260 chars and COLLECT dies
+# copying it: [WinError 206] 文件名或扩展名太长. The PyInstaller torch hook re-adds
+# the full dist-info regardless of any collect_* filtering we do above, so strip
+# the license subtree from the FINAL data TOC here. Drop ONLY .dist-info/licenses/**
+# — METADATA/RECORD stay so importlib.metadata.version (transformers' dep-version
+# probes) still resolves. License texts are runtime-dead; harmless on macOS too.
+a.datas = [
+    entry
+    for entry in a.datas
+    if ".dist-info/licenses" not in entry[0].replace("\\", "/")
+]
 
 pyz = PYZ(a.pure, a.zipped_data, cipher=block_cipher)
 
